@@ -1,0 +1,360 @@
+<?php
+/**
+ * Plugin Name:       Hello Healthy Unified
+ * Plugin URI:        https://hellohealthy.store/
+ * Description:       A unified plugin for all Hello Healthy integrations. Provides shortcodes for embedding a quiz/checkout iframe, a Gemini-powered quiz generator, and a secure API proxy.
+ * Version:           3.0.0
+ * Author:            Hello Healthy
+ * Author URI:        https://hellohealthy.store/
+ * Text Domain:       hello-healthy-unified
+ */
+
+if (!defined('ABSPATH')) {
+    exit; // Exit if accessed directly.
+}
+
+/**
+ * Main plugin class for all Hello Healthy integrations.
+ */
+final class Hello_Healthy_Unified_Plugin {
+
+    private const GEMINI_API_KEY_OPTION = 'hh_gemini_api_key';
+
+    /**
+     * Constructor. Hooks all actions and filters.
+     */
+    public function __construct() {
+        // Admin hooks for settings page.
+        add_action('admin_menu', [$this, 'add_admin_menu']);
+        add_action('admin_init', [$this, 'settings_init']);
+
+        // Frontend script and style hooks.
+        add_action('wp_enqueue_scripts', [$this, 'enqueue_analytics_scripts']);
+        add_action('wp_enqueue_scripts', [$this, 'enqueue_quiz_assets']);
+
+        // REST API initialization.
+        add_action('rest_api_init', [$this, 'register_rest_routes']);
+
+        // Register all shortcodes.
+        add_shortcode('hellohealthy_quiz_iframe', [$this, 'shortcode_quiz_iframe']);
+        add_shortcode('hellohealthy_checkout_iframe', [$this, 'shortcode_checkout_iframe']);
+        add_shortcode('hellohealthy_gemini_quiz', [$this, 'shortcode_gemini_quiz']);
+
+        // Elementor integration.
+        add_action('elementor/widgets/widgets_registered', [$this, 'register_elementor_widget']);
+
+        // Register the uninstall hook.
+        register_uninstall_hook(__FILE__, ['Hello_Healthy_Unified_Plugin', 'on_uninstall']);
+    }
+
+    // =================================================================
+    // Settings Page Setup
+    // =================================================================
+
+    public function add_admin_menu() {
+        add_options_page(
+            'Hello Healthy Unified Settings',
+            'Hello Healthy',
+            'manage_options',
+            'hh-unified-settings',
+            [$this, 'render_options_page']
+        );
+    }
+
+    public function settings_init() {
+        register_setting('hh_unified_settings', 'hellohealthy_frontend_url', ['type' => 'string', 'sanitize_callback' => 'esc_url_raw']);
+        register_setting('hh_unified_settings', 'hellohealthy_backend_url', ['type' => 'string', 'sanitize_callback' => 'esc_url_raw']);
+        register_setting('hh_unified_settings', 'hellohealthy_ga_id', ['type' => 'string', 'sanitize_callback' => 'sanitize_text_field']);
+        register_setting('hh_unified_settings', 'hellohealthy_pixel_id', ['type' => 'string', 'sanitize_callback' => 'sanitize_text_field']);
+        register_setting('hh_unified_settings', self::GEMINI_API_KEY_OPTION, ['type' => 'string', 'sanitize_callback' => 'sanitize_text_field']);
+
+        add_settings_section('hh_integration_section', 'Integration Settings', null, 'hh-unified-settings');
+        add_settings_field('hellohealthy_frontend_url', 'Frontend URL', [$this, 'render_settings_field'], 'hh-unified-settings', 'hh_integration_section', ['name' => 'hellohealthy_frontend_url', 'type' => 'text', 'placeholder' => 'https://frontend-xyz.run.app']);
+        add_settings_field('hellohealthy_backend_url', 'Backend URL', [$this, 'render_settings_field'], 'hh-unified-settings', 'hh_integration_section', ['name' => 'hellohealthy_backend_url', 'type' => 'text', 'placeholder' => 'https://backend-xyz.run.app']);
+
+        add_settings_section('hh_analytics_section', 'Analytics Tracking IDs', null, 'hh-unified-settings');
+        add_settings_field('hellohealthy_ga_id', 'GA4 Measurement ID', [$this, 'render_settings_field'], 'hh-unified-settings', 'hh_analytics_section', ['name' => 'hellohealthy_ga_id', 'type' => 'text', 'placeholder' => 'G-XXXXXXXXXX']);
+        add_settings_field('hellohealthy_pixel_id', 'Facebook Pixel ID', [$this, 'render_settings_field'], 'hh-unified-settings', 'hh_analytics_section', ['name' => 'hellohealthy_pixel_id', 'type' => 'text', 'placeholder' => '123456789012345']);
+
+        add_settings_section('hh_gemini_section', 'Gemini API Settings', '<p>Settings for the on-page Gemini quiz generator.</p>', 'hh-unified-settings');
+        add_settings_field(self::GEMINI_API_KEY_OPTION, 'Gemini API Key', [$this, 'render_settings_field'], 'hh-unified-settings', 'hh_gemini_section', ['name' => self::GEMINI_API_KEY_OPTION, 'type' => 'password']);
+    }
+
+    public function render_settings_field($args) {
+        $value = esc_attr(get_option($args['name'], ''));
+        $type = esc_attr($args['type'] ?? 'text');
+        $placeholder = esc_attr($args['placeholder'] ?? '');
+        printf('<input type="%s" name="%s" value="%s" class="regular-text" placeholder="%s" />', $type, esc_attr($args['name']), $value, $placeholder);
+    }
+
+    public function render_options_page() {
+        if (!current_user_can('manage_options')) return;
+        ?>
+        <div class="wrap">
+            <h1>Hello Healthy Unified Settings</h1>
+            <form action="options.php" method="post">
+                <?php
+                settings_fields('hh_unified_settings');
+                do_settings_sections('hh-unified-settings');
+                submit_button();
+                ?>
+            </form>
+            <h2>Usage Instructions</h2>
+            <p>Use the following shortcodes on your pages:</p>
+            <ul>
+                <li><strong>Iframe Quiz:</strong> <code>[hellohealthy_quiz_iframe]</code> - Embeds the main quiz application.</li>
+                <li><strong>Iframe Checkout:</strong> <code>[hellohealthy_checkout_iframe]</code> - Embeds the checkout page.</li>
+                <li><strong>Gemini Quiz Generator:</strong> <code>[hellohealthy_gemini_quiz topic="nutrition basics"]</code> - Generates a single quiz question.</li>
+            </ul>
+        </div>
+        <?php
+    }
+
+    // =================================================================
+    // Analytics and Asset Enqueueing
+    // =================================================================
+
+    public function enqueue_analytics_scripts() {
+        $ga_id = get_option('hellohealthy_ga_id');
+        if (!empty($ga_id)) {
+            wp_enqueue_script('hellohealthy-ga', "https://www.googletagmanager.com/gtag/js?id=" . esc_attr($ga_id), [], null, false);
+            wp_add_inline_script('hellohealthy-ga', "window.dataLayer = window.dataLayer || []; function gtag(){dataLayer.push(arguments);} gtag('js', new Date()); gtag('config', '" . esc_js($ga_id) . "');");
+        }
+
+        $pixel_id = get_option('hellohealthy_pixel_id');
+        if (!empty($pixel_id)) {
+            wp_register_script('hellohealthy-pixel', '', [], null, false); // Dummy handle
+            wp_enqueue_script('hellohealthy-pixel');
+            wp_add_inline_script('hellohealthy-pixel', "!function(f,b,e,v,n,t,s){if(f.fbq)return;n=f.fbq=function(){n.callMethod?n.callMethod.apply(n,arguments):n.queue.push(arguments)};if(!f._fbq)f._fbq=n;n.push=n;n.loaded=!0;n.version='2.0';n.queue=[];t=b.createElement(e);t.async=!0;t.src=v;s=b.getElementsByTagName(e)[0];s.parentNode.insertBefore(t,s)}(window,document,'script','https://connect.facebook.net/en_US/fbevents.js'); fbq('init', '" . esc_js($pixel_id) . "'); fbq('track', 'PageView');");
+        }
+    }
+
+    public function enqueue_quiz_assets() {
+        global $post;
+        if (is_a($post, 'WP_Post') && has_shortcode($post->post_content, 'hellohealthy_gemini_quiz')) {
+            wp_enqueue_script('hh-quiz-js', plugin_dir_url(__FILE__) . 'assets/hh-quiz.js', ['jquery'], '1.0.0', true);
+            wp_enqueue_style('hh-quiz-css', plugin_dir_url(__FILE__) . 'assets/hh-quiz.css', [], '1.0.0');
+        }
+    }
+
+    // =================================================================
+    // Iframe and REST API Proxy
+    // =================================================================
+
+    public function shortcode_quiz_iframe() {
+        $frontend_url = get_option('hellohealthy_frontend_url', 'https://frontend-xyz.run.app');
+        $iframe_id = 'hh_quiz_iframe_' . wp_generate_uuid4();
+
+        $html = '<iframe id="' . esc_attr($iframe_id) . '" src="' . esc_url($frontend_url) . '" style="width:100%;height:80vh;border:none;"></iframe>';
+        $html .= "<script>
+            (function(){
+                var el = document.getElementById('". esc_js($iframe_id) ."');
+                if (!el) return;
+                el.addEventListener('load', function() {
+                    try { if (typeof gtag === 'function') { gtag('event', 'quiz_started', { event_category: 'Funnel' }); } } catch(e) {}
+                    try { if (typeof fbq === 'function') { fbq('track', 'QuizStarted'); } } catch(e) {}
+                });
+            })();
+        </script>";
+        return $html;
+    }
+
+    public function shortcode_checkout_iframe() {
+        $backend_url = get_option('hellohealthy_backend_url', 'https://backend-xyz.run.app');
+        $iframe_id = 'hh_checkout_iframe_' . wp_generate_uuid4();
+
+        $html = '<iframe id="' . esc_attr($iframe_id) . '" src="' . esc_url($backend_url) . '" style="width:100%;height:80vh;border:none;"></iframe>';
+        $html .= "<script>
+            (function(){
+                var el = document.getElementById('". esc_js($iframe_id) ."');
+                if (!el) return;
+                el.addEventListener('load', function() {
+                    try { if (typeof gtag === 'function') { gtag('event', 'checkout_initiated', { event_category: 'Funnel' }); } } catch(e) {}
+                    try { if (typeof fbq === 'function') { fbq('track', 'InitiateCheckout'); } } catch(e) {}
+                });
+            })();
+        </script>";
+        return $html;
+    }
+
+    public function register_rest_routes() {
+        register_rest_route('hellohealthy/v1', '/quiz', [
+            'methods'  => 'POST',
+            'callback' => [$this, 'handle_quiz_proxy'],
+            'permission_callback' => function ($request) {
+                return wp_verify_nonce($request->get_header('X-WP-Nonce'), 'wp_rest');
+            },
+        ]);
+    }
+
+    public function handle_quiz_proxy($request) {
+        $backend_url = get_option('hellohealthy_backend_url', 'https://backend-xyz.run.app');
+        if (empty($backend_url)) {
+            return new WP_Error('no_backend_url', 'The backend URL is not configured.', ['status' => 503]);
+        }
+
+        $response = wp_remote_post(trailingslashit($backend_url) . 'quiz', [
+            'body'    => $request->get_body(),
+            'headers' => ['Content-Type' => 'application/json'],
+            'timeout' => 20,
+        ]);
+
+        if (is_wp_error($response)) {
+            return new WP_Error('api_error', 'Failed to reach backend service: ' . $response->get_error_message(), ['status' => 502]);
+        }
+
+        $code = wp_remote_retrieve_response_code($response);
+        $body = wp_remote_retrieve_body($response);
+
+        if ($code >= 400) {
+            return new WP_Error('backend_error', 'Backend returned an error.', ['status' => $code, 'body' => $body]);
+        }
+
+        $data = json_decode($body, true);
+        if (json_last_error() !== JSON_ERROR_NONE) {
+            return new WP_Error('json_error', 'Failed to parse JSON response from backend.', ['status' => 500]);
+        }
+
+        return rest_ensure_response($data);
+    }
+
+    // =================================================================
+    // Gemini Quiz Generator
+    // =================================================================
+
+    public function shortcode_gemini_quiz($atts) {
+        $atts = shortcode_atts(['topic' => 'general health'], $atts, 'hellohealthy_gemini_quiz');
+        $topic = sanitize_text_field($atts['topic']);
+
+        $quiz = $this->generate_quiz_question($topic);
+        if (is_wp_error($quiz)) {
+            return '<div class="hh-quiz-error">Error: ' . esc_html($quiz->get_error_message()) . '</div>';
+        }
+
+        ob_start();
+        ?>
+        <div class="hh-quiz-wrap" data-answer="<?php echo esc_attr($quiz['correctAnswer'] ?? ''); ?>">
+            <div class="hh-quiz-question"><?php echo esc_html($quiz['question']); ?></div>
+            <form class="hh-quiz-form">
+                <?php foreach (['optionA', 'optionB', 'optionC', 'optionD'] as $key) : ?>
+                    <?php if (!empty($quiz[$key])) :
+                        $id = 'hh_opt_' . wp_generate_uuid4(); ?>
+                        <div class="hh-quiz-option">
+                            <label for="<?php echo esc_attr($id); ?>">
+                                <input type="radio" name="hh_quiz_choice" id="<?php echo esc_attr($id); ?>" value="<?php echo esc_attr($quiz[$key]); ?>">
+                                <?php echo esc_html($quiz[$key]); ?>
+                            </label>
+                        </div>
+                    <?php endif; ?>
+                <?php endforeach; ?>
+                <div style="margin-top:10px;">
+                    <button type="button" class="hh-quiz-check button">Check Answer</button>
+                    <button type="button" class="hh-quiz-show button">Show Answer</button>
+                </div>
+                <div class="hh-quiz-result" style="margin-top:10px; min-height: 1.2em;"></div>
+            </form>
+        </div>
+        <?php
+        return ob_get_clean();
+    }
+
+    private function generate_quiz_question($topic) {
+        $api_key = get_option(self::GEMINI_API_KEY_OPTION);
+        if (empty($api_key)) {
+            return new WP_Error('no_key', 'The Gemini API key is not configured in settings.');
+        }
+
+        $prompt = "Generate a single multiple-choice quiz question for a health & fitness audience about: {$topic}. Respond in JSON with these exact keys: question, optionA, optionB, optionC, optionD, correctAnswer. The correctAnswer value must be one of the option values (e.g., 'optionB'). Keep answers short.";
+        $endpoint = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=' . rawurlencode($api_key);
+
+        $response = wp_remote_post($endpoint, [
+            'headers' => ['Content-Type' => 'application/json'],
+            'body'    => wp_json_encode(['contents' => [['parts' => [['text' => $prompt]]]]]),
+            'timeout' => 20,
+        ]);
+
+        if (is_wp_error($response)) {
+            return $response;
+        }
+
+        $code = wp_remote_retrieve_response_code($response);
+        $body = wp_remote_retrieve_body($response);
+
+        if ($code >= 400) {
+            return new WP_Error('api_http_error', 'Gemini API returned HTTP ' . intval($code), ['body' => $body]);
+        }
+
+        // Robustly extract JSON from the response, which may be wrapped in markdown backticks.
+        if (preg_match('/```json\s*(\{.*?\})\s*```/s', $body, $matches) || preg_match('/(\{.*?\})/s', $body, $matches)) {
+            $json_text = $matches[1];
+            $data = json_decode($json_text, true);
+            if (json_last_error() === JSON_ERROR_NONE && isset($data['question'])) {
+                return $data;
+            }
+        }
+
+        // Fallback for standard API structure if the above fails.
+        $body_data = json_decode($body, true);
+        if (isset($body_data['candidates'][0]['content']['parts'][0]['text'])) {
+            $raw_text = $body_data['candidates'][0]['content']['parts'][0]['text'];
+            if (preg_match('/(\{.*?\})/s', $raw_text, $text_matches)) {
+                $data = json_decode($text_matches[1], true);
+                if (json_last_error() === JSON_ERROR_NONE && isset($data['question'])) {
+                    return $data;
+                }
+            }
+        }
+
+        return new WP_Error('parse_error', 'Unable to parse a valid quiz from the Gemini API response.');
+    }
+
+    // =================================================================
+    // Elementor Widget
+    // =================================================================
+
+    public function register_elementor_widget() {
+        if (!class_exists('\Elementor\Plugin')) {
+            return;
+        }
+
+        class HH_Elementor_Quiz_Widget extends \Elementor\Widget_Base {
+            public function get_name() { return 'hh_gemini_quiz_widget'; }
+            public function get_title() { return 'Hello Healthy Gemini Quiz'; }
+            public function get_icon() { return 'eicon-form-horizontal'; }
+            public function get_categories() { return ['basic']; }
+
+            protected function _register_controls() {
+                $this->start_controls_section('content_section', ['label' => 'Content']);
+                $this->add_control('topic', [
+                    'label' => 'Quiz Topic',
+                    'type' => \Elementor\Controls_Manager::TEXT,
+                    'default' => 'general health',
+                    'description' => 'Enter the topic for the quiz question (e.g., "cardio exercise").'
+                ]);
+                $this->end_controls_section();
+            }
+
+            protected function render() {
+                $topic = $this->get_settings_for_display('topic');
+                echo do_shortcode('[hellohealthy_gemini_quiz topic="' . esc_attr($topic) . '"]');
+            }
+        }
+
+        \Elementor\Plugin::instance()->widgets_manager->register(new HH_Elementor_Quiz_Widget());
+    }
+
+    // =================================================================
+    // Uninstall Hook
+    // =================================================================
+
+    public static function on_uninstall() {
+        delete_option('hellohealthy_frontend_url');
+        delete_option('hellohealthy_backend_url');
+        delete_option('hellohealthy_ga_id');
+        delete_option('hellohealthy_pixel_id');
+        delete_option(self::GEMINI_API_KEY_OPTION);
+    }
+}
+
+// Instantiate the plugin.
+new Hello_Healthy_Unified_Plugin();
